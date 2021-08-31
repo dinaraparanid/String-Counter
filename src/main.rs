@@ -1,11 +1,23 @@
-use std::fmt::Debug;
-use std::{ffi::OsStr, fs, fs::File, io, io::Read, path::Path};
+extern crate async_recursion;
+extern crate futures;
+
+use async_recursion::async_recursion;
+use futures::executor::block_on;
+use std::{
+    ffi::{OsStr, OsString},
+    fs,
+    fs::File,
+    io,
+    io::Read,
+    path::Path,
+    sync::Arc,
+};
 
 const FIRST: &str = "\n";
 const SECOND: &str = "\r\n";
 
 #[inline]
-fn count_strings_in_file<P: AsRef<Path> + Debug>(path: P) -> io::Result<u128> {
+async fn count_strings_in_file<P: AsRef<Path>>(path: P) -> io::Result<u128> {
     let mut file = String::new();
     File::open(path)?.read_to_string(&mut file)?;
 
@@ -18,29 +30,34 @@ fn count_strings_in_file<P: AsRef<Path> + Debug>(path: P) -> io::Result<u128> {
         .count() as u128)
 }
 
-fn count_strings_in_dir(dir: &Path, formats: &Vec<&OsStr>, cnt: &mut u128) -> io::Result<u128> {
+#[async_recursion]
+async fn count_strings_in_dir(dir: &Path, formats: Arc<Vec<OsString>>) -> io::Result<u128> {
     if dir.is_dir() {
         let dir = fs::read_dir(dir)?;
+        let mut tasks = Vec::with_capacity(1000);
 
         for entry in dir {
             let path = entry?.path();
+            let formats = formats.clone();
 
-            *cnt += if path.is_dir() {
-                count_strings_in_dir(&path, formats, &mut 0)?
-            } else {
-                let path = path.to_str().unwrap().to_string();
-
-                if formats.iter().any(|&f| path.ends_with(f.to_str().unwrap())) {
-                    count_strings_in_file(path)?
+            tasks.push(async move {
+                if path.is_dir() {
+                    count_strings_in_dir(&path, formats).await.unwrap()
                 } else {
-                    0
+                    let path = path.to_str().unwrap().to_string();
+
+                    if formats.iter().any(|f| path.ends_with(f.to_str().unwrap())) {
+                        count_strings_in_file(path).await.unwrap()
+                    } else {
+                        0
+                    }
                 }
-            };
+            });
         }
 
-        Ok(*cnt)
+        Ok(futures::future::join_all(tasks).await.iter().sum())
     } else {
-        Ok(*cnt + count_strings_in_file(dir)?)
+        Ok(count_strings_in_file(dir).await?)
     }
 }
 
@@ -60,16 +77,16 @@ fn main() -> io::Result<()> {
 
     println!(
         "Strings founded: {}",
-        count_strings_in_dir(
+        block_on(count_strings_in_dir(
             dir,
-            &formats
-                .trim()
-                .split_whitespace()
-                .map(|s| OsStr::new(s))
-                .collect::<Vec<_>>(),
-            &mut 0
-        )?
+            Arc::new(
+                formats
+                    .trim()
+                    .split_whitespace()
+                    .map(|s| OsStr::new(s).to_os_string())
+                    .collect::<Vec<_>>()
+            )
+        ))?
     );
-
     Ok(())
 }
