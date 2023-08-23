@@ -3,6 +3,7 @@ extern crate futures;
 
 use async_recursion::async_recursion;
 use futures::executor::block_on;
+
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -13,8 +14,9 @@ use std::{
     sync::Arc,
 };
 
-const FIRST: &str = "\n";
-const SECOND: &str = "\r\n";
+const POSIX_SEP: &str = "\n";
+const WINDOWS_SEP: &str = "\r\n";
+const MAC_SEP: &str = "\r";
 
 #[inline]
 async fn count_strings_in_file<P: AsRef<Path>>(path: P) -> io::Result<u128> {
@@ -25,7 +27,7 @@ async fn count_strings_in_file<P: AsRef<Path>>(path: P) -> io::Result<u128> {
         .trim()
         .split(|x| {
             let s = String::from(x);
-            s == FIRST || s == SECOND
+            s == POSIX_SEP || s == WINDOWS_SEP || s == MAC_SEP
         })
         .count() as u128)
 }
@@ -34,26 +36,29 @@ async fn count_strings_in_file<P: AsRef<Path>>(path: P) -> io::Result<u128> {
 async fn count_strings_in_dir(dir: &Path, formats: Arc<Vec<OsString>>) -> io::Result<u128> {
     if dir.is_dir() {
         let dir = fs::read_dir(dir)?;
-        let mut tasks = Vec::with_capacity(1000);
 
-        for entry in dir {
-            let path = entry?.path();
-            let formats = formats.clone();
+        let tasks = dir
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| {
+                let path = entry.path();
+                let formats = formats.clone();
 
-            tasks.push(async move {
-                if path.is_dir() {
-                    count_strings_in_dir(&path, formats).await.unwrap()
-                } else {
-                    let path = path.to_str().unwrap().to_string();
-
-                    if formats.iter().any(|f| path.ends_with(f.to_str().unwrap())) {
-                        count_strings_in_file(path).await.unwrap()
+                async move {
+                    if path.is_dir() {
+                        count_strings_in_dir(&path, formats).await.unwrap()
                     } else {
-                        0
+                        let path = path.to_str().unwrap().to_string();
+
+                        if formats.iter().any(|f| path.ends_with(f.to_str().unwrap())) {
+                            count_strings_in_file(path).await.unwrap()
+                        } else {
+                            0
+                        }
                     }
                 }
-            });
-        }
+            })
+            .collect::<Vec<_>>();
 
         Ok(futures::future::join_all(tasks).await.iter().sum())
     } else {
@@ -88,5 +93,6 @@ fn main() -> io::Result<()> {
             )
         ))?
     );
+
     Ok(())
 }
